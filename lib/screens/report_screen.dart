@@ -10,10 +10,25 @@ import '../common/theme.dart';
 enum _ResponseType { html, table, keyValue, list, plain }
 
 // Field names that may carry a photo URL
+// All compared after .toLowerCase() so casing (photoURL, PhotoUrl, etc.) is handled
 const _photoKeys = {
-  'photourl', 'photo_url', 'photo', 'profile', 'profile_photo',
-  'image', 'image_url', 'picture', 'avatar', 'pic', 'passport',
-  'passport_photo', 'student_photo', 'studentphoto',
+  'photourl',       // matches: photoURL, photoUrl, PhotoURL
+  'photo_url',
+  'photo',
+  'profile',
+  'profile_photo',
+  'profilephoto',
+  'image',
+  'image_url',
+  'picture',
+  'avatar',
+  'pic',
+  'passport',
+  'passport_photo',
+  'student_photo',
+  'studentphoto',
+  'studentimage',
+  'student_image',
 };
 
 class ReportScreen extends StatefulWidget {
@@ -156,7 +171,7 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
       .join(' ');
 
   bool _isPhotoKey(String key) =>
-      _photoKeys.contains(key.toLowerCase().replaceAll(' ', '_'));
+      _photoKeys.contains(key.toString().toLowerCase().replaceAll(' ', '_').replaceAll('-', '_'));
 
   void _copyToClipboard(String text) {
     Clipboard.setData(ClipboardData(text: text));
