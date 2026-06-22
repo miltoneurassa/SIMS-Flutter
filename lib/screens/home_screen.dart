@@ -204,7 +204,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _isLoading = false);
 
     if (result.success) {
-      _showResultScreen(destination.replaceAll('_', ' '), result.data);
+      _showResultScreen(destination.replaceAll('_', ' '), result.data, section: destination);
     } else {
       _showError(result.message);
     }
@@ -241,16 +241,16 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _isLoading = false);
 
     if (result.success) {
-      _showResultScreen('Attendance', result.data);
+      _showResultScreen('Attendance', result.data, section: 'ATTENDANCE');
     } else {
       _showError(result.message);
     }
   }
 
-  void _showResultScreen(String title, dynamic data) {
+  void _showResultScreen(String title, dynamic data, {String section = ''}) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ReportScreen(title: title, data: data),
+        builder: (_) => ReportScreen(title: title, data: data, section: section),
       ),
     );
   }

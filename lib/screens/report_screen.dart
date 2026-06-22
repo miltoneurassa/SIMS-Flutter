@@ -7,9 +7,9 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../common/theme.dart';
 
-enum _ResponseType { html, table, keyValue, list, plain }
+// mixed = Map that has a nested HTML field (e.g. examination response)
+enum _ResponseType { html, mixed, table, keyValue, list, plain }
 
-// Field names that may carry a photo URL
 // All compared after .toLowerCase() so casing (photoURL, PhotoUrl, etc.) is handled
 const _photoKeys = {
   'photourl',       // matches: photoURL, photoUrl, PhotoURL
@@ -31,33 +31,55 @@ const _photoKeys = {
   'student_image',
 };
 
+// Maps each section (actionKey) to the exact field that holds the HTML report
+const _sectionHtmlField = {
+  'REGISTRATION':           'admission',
+  'PAYMENTS':               'payment',
+  'EXAMINATION_NUMBER':     'examination_number',
+  'ALLOCATION':             'allocation',
+  'OUTSTANDING_BALANCE':    'balance',
+  'ID_CARD':                'card_info',
+  'EXAMINATION':            'examination',
+  'STUDENT_DETAILS':        'student_details',
+};
+
 class ReportScreen extends StatefulWidget {
   final String title;
   final dynamic data;
+  final String section; // e.g. 'REGISTRATION', 'EXAMINATION'
 
-  const ReportScreen({super.key, required this.title, required this.data});
+  const ReportScreen({
+    super.key,
+    required this.title,
+    required this.data,
+    this.section = '',
+  });
 
   @override
   State<ReportScreen> createState() => _ReportScreenState();
 }
 
 class _ReportScreenState extends State<ReportScreen> {
-  late final dynamic _parsed;   // always decoded — never a raw JSON string
+  late final dynamic _parsed;
   late final _ResponseType _type;
   late final String? _photoUrl;
+  // For html / mixed types
   late final String _htmlContent;
+  // For mixed type: the non-HTML fields (student info etc.)
+  late final Map<String, dynamic> _metaFields;
   WebViewController? _webController;
   bool _webLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _parsed   = _decode(widget.data);
-    _photoUrl = _extractPhoto(_parsed);
-    _type     = _detect(_parsed);
-    _htmlContent = _type == _ResponseType.html ? _wrapHtml(_parsed.toString()) : '';
+    _parsed    = _decode(widget.data);
+    _photoUrl  = _extractPhoto(_parsed);
+    _type      = _detect(_parsed);
+    _metaFields = {};
+    _htmlContent = _buildHtmlContent();
 
-    if (_type == _ResponseType.html) {
+    if (_type == _ResponseType.html || _type == _ResponseType.mixed) {
       _webController = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(const Color(0xFFF0F4FF))
@@ -68,7 +90,9 @@ class _ReportScreenState extends State<ReportScreen> {
     }
   }
 
-  // Recursively decode JSON strings so we never display raw JSON to the user
+  // ─── Decoding ──────────────────────────────────────────────────────────────
+
+  /// Recursively decode JSON strings — user never sees raw JSON
   dynamic _decode(dynamic raw) {
     if (raw == null) return null;
     if (raw is Map || raw is List) return raw;
@@ -80,9 +104,11 @@ class _ReportScreenState extends State<ReportScreen> {
     return raw;
   }
 
-  // Find a photo URL field anywhere in the top-level map
+  // ─── Photo extraction ──────────────────────────────────────────────────────
+
   String? _extractPhoto(dynamic data) {
     if (data is! Map) return null;
+    // Check top-level fields
     for (final entry in data.entries) {
       final key = entry.key.toString().toLowerCase().replaceAll(' ', '_');
       if (_photoKeys.contains(key)) {
@@ -92,30 +118,102 @@ class _ReportScreenState extends State<ReportScreen> {
         }
       }
     }
+    // Also check inside nested maps (e.g. studentinfo.photoURL)
+    for (final entry in data.entries) {
+      if (entry.value is Map) {
+        final nested = _extractPhoto(entry.value);
+        if (nested != null) return nested;
+      }
+    }
     return null;
   }
 
+  bool _isPhotoKey(String key) =>
+      _photoKeys.contains(key.toString().toLowerCase()
+          .replaceAll(' ', '_').replaceAll('-', '_'));
+
+  // ─── Type detection ────────────────────────────────────────────────────────
+  //
+  // IMPORTANT: we never call .toString() on a Map to check for HTML —
+  // that was the root cause of the raw JSON dump appearing at the top.
+
   _ResponseType _detect(dynamic data) {
     if (data == null) return _ResponseType.plain;
-    final s = data.toString().trimLeft();
-    if (s.startsWith('<') ||
-        s.toLowerCase().contains('<html') ||
-        s.toLowerCase().contains('<table') ||
-        s.toLowerCase().contains('<div')) {
-      return _ResponseType.html;
-    }
+
+    // --- Map ---
     if (data is Map) {
-      if (data.values.any((v) => v is Map || v is List)) return _ResponseType.table;
+      // If we know the section, check whether its designated HTML field exists
+      if (widget.section.isNotEmpty &&
+          _sectionHtmlField.containsKey(widget.section)) {
+        final htmlField = _sectionHtmlField[widget.section]!;
+        final val = data[htmlField]?.toString().trim() ?? '';
+        if (val.isNotEmpty) return _ResponseType.mixed;
+      }
+      // Does it have nested maps/lists?
+      if (data.values.any((v) => v is Map || v is List)) {
+        return _ResponseType.table;
+      }
       return _ResponseType.keyValue;
     }
+
+    // --- List ---
     if (data is List) return _ResponseType.list;
+
+    // --- String: only check HTML on actual strings ---
+    final s = data.toString().trim();
+    if (_isHtmlString(s)) return _ResponseType.html;
+
     return _ResponseType.plain;
   }
 
-  // ─── HTML helpers ─────────────────────────────────────────────────────────
+  bool _isHtmlString(String s) {
+    final lower = s.toLowerCase().trimLeft();
+    return lower.startsWith('<') ||
+        lower.contains('<html') ||
+        lower.contains('<table') ||
+        lower.contains('<div') ||
+        lower.contains('<body');
+  }
+
+  // ─── HTML building ─────────────────────────────────────────────────────────
+
+  String _buildHtmlContent() {
+    if (_type == _ResponseType.html) {
+      return _wrapHtml(_parsed.toString());
+    }
+    if (_type == _ResponseType.mixed) {
+      final map = _parsed as Map;
+      // Get the designated HTML field for this section
+      final htmlField = _sectionHtmlField[widget.section] ?? '';
+      final htmlFragment = map[htmlField]?.toString().trim() ?? '';
+
+      // Collect all other fields as meta (for the student info card)
+      for (final entry in map.entries) {
+        if (entry.key.toString() == htmlField) continue; // skip the HTML field
+        if (entry.value is Map) {
+          // Flatten nested maps (e.g. studentinfo) into meta
+          (entry.value as Map).forEach((k, v) {
+            _metaFields[k.toString()] = v;
+          });
+        } else {
+          final val = entry.value?.toString().trim() ?? '';
+          if (!_isPhotoKey(entry.key.toString()) && val.isNotEmpty) {
+            _metaFields[entry.key.toString()] = entry.value;
+          }
+        }
+      }
+      return _wrapHtml(htmlFragment);
+    }
+    return '';
+  }
 
   String _wrapHtml(String raw) {
-    if (raw.toLowerCase().contains('<html')) return _injectStyles(raw);
+    // Strip any leading non-HTML content (e.g. JSON/map text before first tag)
+    String cleaned = raw;
+    final firstTag = raw.indexOf('<');
+    if (firstTag > 0) cleaned = raw.substring(firstTag);
+
+    if (cleaned.toLowerCase().contains('<html')) return _injectStyles(cleaned);
     return '''<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
@@ -132,7 +230,7 @@ tbody tr{border-bottom:1px solid #e5e7eb}
 tbody tr:last-child{border-bottom:none}
 tbody tr:nth-child(even){background:#f8faff}
 tbody td{padding:10px 14px;font-size:13px;color:#1a1a2e;vertical-align:top}
-img{max-width:100%;border-radius:10px;margin:8px 0}
+img{max-width:100%;border-radius:10px;margin:8px 0;display:block}
 .card{background:#fff;border-radius:14px;padding:16px;margin:10px 0;box-shadow:0 2px 12px rgba(21,101,192,.10)}
 .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
 .badge-success{background:#dcfce7;color:#166534}
@@ -142,7 +240,7 @@ img{max-width:100%;border-radius:10px;margin:8px 0}
 p{margin:6px 0}strong{color:#1565c0}
 hr{border:none;border-top:1px solid #e5e7eb;margin:12px 0}
 ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
-</style></head><body>$raw</body></html>''';
+</style></head><body>$cleaned</body></html>''';
   }
 
   String _injectStyles(String html) {
@@ -155,28 +253,27 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
         'tbody tr:nth-child(even){background:#f8faff}'
         'tbody td{padding:10px 14px;font-size:13px}'
         'h1,h2,h3{color:#1565c0;margin:10px 0 6px}'
-        'img{max-width:100%;border-radius:10px}'
+        'img{max-width:100%;border-radius:10px;display:block}'
         '</style>';
     return html.contains('</head>')
         ? html.replaceFirst('</head>', '$style</head>')
         : '$style$html';
   }
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────
+  // ─── Helpers ───────────────────────────────────────────────────────────────
 
   String _formatKey(String key) => key
       .replaceAll('_', ' ')
       .split(' ')
-      .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1).toLowerCase()}' : '')
+      .map((w) => w.isNotEmpty
+          ? '${w[0].toUpperCase()}${w.substring(1).toLowerCase()}'
+          : '')
       .join(' ');
-
-  bool _isPhotoKey(String key) =>
-      _photoKeys.contains(key.toString().toLowerCase().replaceAll(' ', '_').replaceAll('-', '_'));
 
   void _copyToClipboard(String text) {
     Clipboard.setData(ClipboardData(text: text));
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('Copied to clipboard', style: GoogleFonts.poppins(fontSize: 13)),
+      content: Text('Copied', style: GoogleFonts.poppins(fontSize: 13)),
       backgroundColor: AppTheme.success,
       behavior: SnackBarBehavior.floating,
       duration: const Duration(seconds: 2),
@@ -185,7 +282,7 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
     ));
   }
 
-  // ─── Build ────────────────────────────────────────────────────────────────
+  // ─── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -195,10 +292,12 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
       appBar: AppBar(
         backgroundColor: AppTheme.primary,
         foregroundColor: Colors.white,
-        title: Text(title, style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+        title: Text(title,
+            style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
         elevation: 0,
         actions: [
-          if (_type != _ResponseType.html)
+          if (_type == _ResponseType.keyValue ||
+              _type == _ResponseType.table)
             IconButton(
               icon: const Icon(Icons.copy_rounded),
               tooltip: 'Copy',
@@ -206,51 +305,116 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
             ),
         ],
       ),
-      body: _type == _ResponseType.html
-          ? _buildHtmlView()
-          : _buildScrollable(title),
+      body: _buildBody(title),
     );
   }
 
-  // ─── HTML WebView ─────────────────────────────────────────────────────────
+  Widget _buildBody(String title) {
+    switch (_type) {
+      case _ResponseType.html:
+        return _buildHtmlOnly();
+      case _ResponseType.mixed:
+        return _buildMixed(title);
+      case _ResponseType.table:
+        return _buildScrollable(title, _buildNestedTable(_parsed as Map));
+      case _ResponseType.keyValue:
+        return _buildScrollable(title, _buildKeyValueCard(_parsed as Map));
+      case _ResponseType.list:
+        return _buildScrollable(title, _buildListWidget(_parsed as List));
+      default:
+        return _buildScrollable(title, _buildPlainCard(_parsed.toString()));
+    }
+  }
 
-  Widget _buildHtmlView() => Stack(children: [
+  // ─── Pure HTML view ────────────────────────────────────────────────────────
+
+  Widget _buildHtmlOnly() => Stack(children: [
         WebViewWidget(controller: _webController!),
-        if (_webLoading)
-          Container(
-            color: const Color(0xFFF0F4FF),
-            child: Center(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                const CircularProgressIndicator(color: AppTheme.primary),
-                const SizedBox(height: 14),
-                Text('Loading...', style: GoogleFonts.poppins(color: AppTheme.textSecondary)),
-              ]),
-            ),
-          ),
+        if (_webLoading) _loadingOverlay(),
       ]);
 
-  // ─── Scrollable content ───────────────────────────────────────────────────
+  // ─── Mixed view: photo + meta fields on top, HTML report below ─────────────
 
-  Widget _buildScrollable(String title) {
+  Widget _buildMixed(String title) {
+    return Column(children: [
+      // Scrollable top section: photo + student info
+      if (_photoUrl != null || _metaFields.isNotEmpty)
+        SingleChildScrollView(
+          physics: const NeverScrollableScrollPhysics(),
+          child: Column(children: [
+            if (_photoUrl != null) ...[
+              const SizedBox(height: 16),
+              _buildPhotoCard(_photoUrl!),
+              const SizedBox(height: 12),
+            ],
+            if (_metaFields.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: _buildKeyValueCard(_metaFields),
+              ),
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildSectionLabel('Report'),
+            ),
+            const SizedBox(height: 8),
+          ]),
+        ),
+      // WebView fills the remaining space
+      Expanded(
+        child: Stack(children: [
+          WebViewWidget(controller: _webController!),
+          if (_webLoading) _loadingOverlay(),
+        ]),
+      ),
+    ]);
+  }
+
+  Widget _buildSectionLabel(String label) => Align(
+        alignment: Alignment.centerLeft,
+        child: Text(label,
+            style: GoogleFonts.poppins(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.primary)),
+      );
+
+  Widget _loadingOverlay() => Container(
+        color: const Color(0xFFF0F4FF),
+        child: Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const CircularProgressIndicator(color: AppTheme.primary),
+            const SizedBox(height: 14),
+            Text('Loading...',
+                style: GoogleFonts.poppins(color: AppTheme.textSecondary)),
+          ]),
+        ),
+      );
+
+  // ─── Scrollable wrapper ────────────────────────────────────────────────────
+
+  Widget _buildScrollable(String title, Widget content) {
     return SingleChildScrollView(
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.all(16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Photo at the very top
         if (_photoUrl != null) ...[
           _buildPhotoCard(_photoUrl!),
           const SizedBox(height: 16),
         ],
         _buildHeader(title),
         const SizedBox(height: 16),
-        _buildContent().animate(delay: 150.ms).fadeIn(duration: 350.ms).slideY(begin: 0.08),
+        content
+            .animate(delay: 150.ms)
+            .fadeIn(duration: 350.ms)
+            .slideY(begin: 0.08),
         const SizedBox(height: 24),
         _buildDoneButton(),
       ]),
     );
   }
 
-  // ─── Photo card ───────────────────────────────────────────────────────────
+  // ─── Photo card ────────────────────────────────────────────────────────────
 
   Widget _buildPhotoCard(String url) {
     return Center(
@@ -258,12 +422,15 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
         decoration: BoxDecoration(
           color: Colors.white,
           shape: BoxShape.circle,
-          boxShadow: [BoxShadow(
-            color: AppTheme.primary.withOpacity(0.2),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          )],
-          border: Border.all(color: AppTheme.primary.withOpacity(0.25), width: 3),
+          boxShadow: [
+            BoxShadow(
+              color: AppTheme.primary.withOpacity(0.2),
+              blurRadius: 24,
+              offset: const Offset(0, 8),
+            )
+          ],
+          border:
+              Border.all(color: AppTheme.primary.withOpacity(0.25), width: 3),
         ),
         child: ClipOval(
           child: CachedNetworkImage(
@@ -275,21 +442,26 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
               width: 120,
               height: 120,
               color: AppTheme.primary.withOpacity(0.08),
-              child: const Icon(Icons.person_rounded, size: 56, color: AppTheme.primary),
+              child: const Icon(Icons.person_rounded,
+                  size: 56, color: AppTheme.primary),
             ),
             errorWidget: (_, __, ___) => Container(
               width: 120,
               height: 120,
               color: AppTheme.primary.withOpacity(0.08),
-              child: const Icon(Icons.broken_image_rounded, size: 48, color: AppTheme.primary),
+              child: const Icon(Icons.broken_image_rounded,
+                  size: 48, color: AppTheme.primary),
             ),
           ),
         ),
       ),
-    ).animate().scale(duration: 500.ms, curve: Curves.elasticOut).fadeIn(duration: 300.ms);
+    )
+        .animate()
+        .scale(duration: 500.ms, curve: Curves.elasticOut)
+        .fadeIn(duration: 300.ms);
   }
 
-  // ─── Header banner ────────────────────────────────────────────────────────
+  // ─── Header banner ─────────────────────────────────────────────────────────
 
   Widget _buildHeader(String title) {
     return Container(
@@ -305,22 +477,30 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
             color: Colors.white.withOpacity(0.2),
             borderRadius: BorderRadius.circular(12),
           ),
-          child: const Icon(Icons.description_rounded, color: Colors.white, size: 24),
+          child: const Icon(Icons.description_rounded,
+              color: Colors.white, size: 24),
         ),
         const SizedBox(width: 14),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(title,
-              style: GoogleFonts.poppins(
-                  fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
-          Text(_typeLabel(),
-              style: GoogleFonts.poppins(fontSize: 12, color: Colors.white70)),
-        ])),
+        Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title,
+                style: GoogleFonts.poppins(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white)),
+            Text(_typeLabel(),
+                style:
+                    GoogleFonts.poppins(fontSize: 12, color: Colors.white70)),
+          ]),
+        ),
       ]),
     ).animate().fadeIn().slideY(begin: -0.05);
   }
 
   String _typeLabel() {
     switch (_type) {
+      case _ResponseType.mixed:    return 'Student report';
       case _ResponseType.table:    return 'Structured data';
       case _ResponseType.keyValue: return 'Student record';
       case _ResponseType.list:     return '${(_parsed as List).length} items';
@@ -328,91 +508,104 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
     }
   }
 
-  Widget _buildContent() {
-    switch (_type) {
-      case _ResponseType.html:     return const SizedBox.shrink();
-      case _ResponseType.table:    return _buildNestedTable(_parsed as Map);
-      case _ResponseType.keyValue: return _buildKeyValueCard(_parsed as Map);
-      case _ResponseType.list:     return _buildListWidget(_parsed as List);
-      default:                     return _buildPlainCard(_parsed.toString());
-    }
-  }
-
-  // ─── Key-Value card ───────────────────────────────────────────────────────
+  // ─── Key-Value card ────────────────────────────────────────────────────────
 
   Widget _buildKeyValueCard(Map data) {
-    // Skip photo fields — already shown at the top
     final entries = data.entries
         .where((e) =>
             !_isPhotoKey(e.key.toString()) &&
             e.value != null &&
-            e.value.toString().trim().isNotEmpty)
+            e.value.toString().trim().isNotEmpty &&
+            !_isHtmlString(e.value.toString()))
         .toList();
 
-    if (entries.isEmpty) {
-      return _buildPlainCard('No additional details available.');
-    }
+    if (entries.isEmpty) return const SizedBox.shrink();
 
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 16, offset: const Offset(0, 4))],
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(0.06),
+              blurRadius: 16,
+              offset: const Offset(0, 4))
+        ],
       ),
       child: Column(
         children: entries.asMap().entries.map((entry) {
-          final idx   = entry.key;
-          final e     = entry.value;
+          final idx    = entry.key;
+          final e      = entry.value;
           final isLast = idx == entries.length - 1;
           final value  = e.value.toString().trim();
           final isLong = value.length > 55;
 
           return Column(children: [
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
               child: isLong
-                  ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(_formatKey(e.key.toString()),
-                          style: GoogleFonts.poppins(
-                              fontSize: 11, fontWeight: FontWeight.w600, color: AppTheme.textSecondary)),
-                      const SizedBox(height: 6),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFF8FAFF),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: AppTheme.divider),
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(_formatKey(e.key.toString()),
+                            style: GoogleFonts.poppins(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: AppTheme.textSecondary)),
+                        const SizedBox(height: 6),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF8FAFF),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: AppTheme.divider),
+                          ),
+                          child: Text(value,
+                              style: GoogleFonts.poppins(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                  color: AppTheme.textPrimary)),
                         ),
-                        child: Text(value,
-                            style: GoogleFonts.poppins(
-                                fontSize: 13, fontWeight: FontWeight.w500, color: AppTheme.textPrimary)),
-                      ),
-                    ])
-                  : Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Expanded(
-                        flex: 4,
-                        child: Text(_formatKey(e.key.toString()),
-                            style: GoogleFonts.poppins(
-                                fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.textSecondary)),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        flex: 5,
-                        child: Text(value,
-                            style: GoogleFonts.poppins(
-                                fontSize: 13, fontWeight: FontWeight.w600, color: AppTheme.textPrimary)),
-                      ),
-                    ]),
+                      ],
+                    )
+                  : Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          flex: 4,
+                          child: Text(_formatKey(e.key.toString()),
+                              style: GoogleFonts.poppins(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppTheme.textSecondary)),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          flex: 5,
+                          child: Text(value,
+                              style: GoogleFonts.poppins(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppTheme.textPrimary)),
+                        ),
+                      ],
+                    ),
             ),
-            if (!isLast) Divider(height: 1, color: AppTheme.divider, indent: 18, endIndent: 18),
+            if (!isLast)
+              Divider(
+                  height: 1,
+                  color: AppTheme.divider,
+                  indent: 18,
+                  endIndent: 18),
           ]);
         }).toList(),
       ),
     );
   }
 
-  // ─── Nested sections (Map with nested Maps/Lists) ─────────────────────────
+  // ─── Nested sections ───────────────────────────────────────────────────────
 
   Widget _buildNestedTable(Map data) {
     return Column(
@@ -426,14 +619,14 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
         if (value is List && value.isNotEmpty && value.first is Map) {
           return _section(key, _buildDataTable(value));
         }
-        if (value is Map) {
-          return _section(key, _buildKeyValueCard(value));
-        }
-        if (value is List) {
-          return _section(key, _buildListWidget(value));
-        }
-        // Single value
-        if (value == null || value.toString().trim().isEmpty) return const SizedBox.shrink();
+        if (value is Map) return _section(key, _buildKeyValueCard(value));
+        if (value is List) return _section(key, _buildListWidget(value));
+
+        final str = value?.toString().trim() ?? '';
+        if (str.isEmpty) return const SizedBox.shrink();
+        // HTML value inside a map field — skip (handled by mixed type)
+        if (_isHtmlString(str)) return const SizedBox.shrink();
+
         return _section(
           key,
           Container(
@@ -444,8 +637,9 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: AppTheme.divider),
             ),
-            child: Text(value.toString(),
-                style: GoogleFonts.poppins(fontSize: 14, color: AppTheme.textPrimary)),
+            child: Text(str,
+                style: GoogleFonts.poppins(
+                    fontSize: 14, color: AppTheme.textPrimary)),
           ),
         );
       }).toList(),
@@ -459,24 +653,32 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(title,
                 style: GoogleFonts.poppins(
-                    fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.primary)),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.primary)),
           ),
           child,
           const SizedBox(height: 20),
         ],
       );
 
-  // ─── DataTable for List<Map> ──────────────────────────────────────────────
+  // ─── DataTable ─────────────────────────────────────────────────────────────
 
   Widget _buildDataTable(List rows) {
     if (rows.isEmpty) return const SizedBox.shrink();
-    final headers = (rows.first as Map).keys.map((k) => k.toString()).toList();
+    final headers =
+        (rows.first as Map).keys.map((k) => k.toString()).toList();
 
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 12, offset: const Offset(0, 3))],
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(0.06),
+              blurRadius: 12,
+              offset: const Offset(0, 3))
+        ],
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
@@ -485,11 +687,16 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
           child: DataTable(
             headingRowColor: MaterialStateProperty.all(AppTheme.primary),
             headingTextStyle: GoogleFonts.poppins(
-                fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white),
-            dataTextStyle: GoogleFonts.poppins(fontSize: 12, color: AppTheme.textPrimary),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Colors.white),
+            dataTextStyle: GoogleFonts.poppins(
+                fontSize: 12, color: AppTheme.textPrimary),
             columnSpacing: 20,
             horizontalMargin: 16,
-            columns: headers.map((h) => DataColumn(label: Text(_formatKey(h)))).toList(),
+            columns: headers
+                .map((h) => DataColumn(label: Text(_formatKey(h))))
+                .toList(),
             rows: rows.asMap().entries.map((entry) {
               final row = entry.value as Map;
               return DataRow(
@@ -507,7 +714,7 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
     );
   }
 
-  // ─── List ─────────────────────────────────────────────────────────────────
+  // ─── List ──────────────────────────────────────────────────────────────────
 
   Widget _buildListWidget(List items) {
     if (items.isNotEmpty && items.first is Map) return _buildDataTable(items);
@@ -515,7 +722,9 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 12)],
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 12)
+        ],
       ),
       child: Column(
         children: items.asMap().entries.map((entry) {
@@ -527,19 +736,27 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
                 radius: 16,
                 child: Text('${entry.key + 1}',
                     style: GoogleFonts.poppins(
-                        fontSize: 11, fontWeight: FontWeight.w700, color: AppTheme.primary)),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.primary)),
               ),
               title: Text(entry.value.toString(),
-                  style: GoogleFonts.poppins(fontSize: 13, color: AppTheme.textPrimary)),
+                  style: GoogleFonts.poppins(
+                      fontSize: 13, color: AppTheme.textPrimary)),
             ),
-            if (!isLast) Divider(height: 1, color: AppTheme.divider, indent: 56, endIndent: 16),
+            if (!isLast)
+              Divider(
+                  height: 1,
+                  color: AppTheme.divider,
+                  indent: 56,
+                  endIndent: 16),
           ]);
         }).toList(),
       ),
     );
   }
 
-  // ─── Plain text ───────────────────────────────────────────────────────────
+  // ─── Plain text ────────────────────────────────────────────────────────────
 
   Widget _buildPlainCard(String text) => Container(
         width: double.infinity,
@@ -547,13 +764,18 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(18),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 12)],
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 12)
+          ],
         ),
         child: SelectableText(text,
-            style: GoogleFonts.poppins(fontSize: 14, color: AppTheme.textPrimary, height: 1.7)),
+            style: GoogleFonts.poppins(
+                fontSize: 14,
+                color: AppTheme.textPrimary,
+                height: 1.7)),
       );
 
-  // ─── Done button ──────────────────────────────────────────────────────────
+  // ─── Done button ───────────────────────────────────────────────────────────
 
   Widget _buildDoneButton() => SizedBox(
         width: double.infinity,
@@ -562,7 +784,8 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
           onPressed: () => Navigator.of(context).pop(),
           icon: const Icon(Icons.check_rounded, size: 18),
           label: Text('Done',
-              style: GoogleFonts.poppins(fontSize: 15, fontWeight: FontWeight.w600)),
+              style: GoogleFonts.poppins(
+                  fontSize: 15, fontWeight: FontWeight.w600)),
         ),
       ).animate(delay: 300.ms).fadeIn().slideY(begin: 0.15);
 }
