@@ -34,13 +34,13 @@ const _photoKeys = {
 // Maps each section (actionKey) to the exact field that holds the HTML report
 const _sectionHtmlField = {
   'REGISTRATION':           'admission',
-  'PAYMENTS':               'payment',
+  'PAYMENTS':               'payments',
   'EXAMINATION_NUMBER':     'examination_number',
   'ALLOCATION':             'allocation',
   'OUTSTANDING_BALANCE':    'balance',
   'ID_CARD':                'card_info',
   'EXAMINATION':            'examination',
-  'STUDENT_DETAILS':        'student_details',
+  'STUDENT_DETAILS':        'studentdetails',
 };
 
 class ReportScreen extends StatefulWidget {
