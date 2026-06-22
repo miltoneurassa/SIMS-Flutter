@@ -315,11 +315,11 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
 
   Widget _buildContent() {
     switch (_type) {
+      case _ResponseType.html:     return const SizedBox.shrink();
       case _ResponseType.table:    return _buildNestedTable(_parsed as Map);
       case _ResponseType.keyValue: return _buildKeyValueCard(_parsed as Map);
       case _ResponseType.list:     return _buildListWidget(_parsed as List);
       default:                     return _buildPlainCard(_parsed.toString());
-      case _ResponseType.html:     return const SizedBox.shrink();
     }
   }
 
