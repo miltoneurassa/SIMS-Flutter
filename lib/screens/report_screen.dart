@@ -194,21 +194,6 @@ class _ReportScreenState extends State<ReportScreen> {
       final htmlField = _sectionHtmlField[widget.section] ?? '';
       final htmlFragment = map[htmlField]?.toString().trim() ?? '';
 
-      // Collect all other fields as meta (for the student info card)
-      for (final entry in map.entries) {
-        if (entry.key.toString() == htmlField) continue; // skip the HTML field
-        if (entry.value is Map) {
-          // Flatten nested maps (e.g. studentinfo) into meta
-          (entry.value as Map).forEach((k, v) {
-            _metaFields[k.toString()] = v;
-          });
-        } else {
-          final val = entry.value?.toString().trim() ?? '';
-          if (!_isPhotoKey(entry.key.toString()) && val.isNotEmpty) {
-            _metaFields[entry.key.toString()] = entry.value;
-          }
-        }
-      }
       return _wrapHtml(htmlFragment);
     }
     return '';
@@ -344,30 +329,13 @@ ul,ol{padding-left:20px;margin:8px 0}li{margin:4px 0}
 
   Widget _buildMixed(String title) {
     return Column(children: [
-      // Scrollable top section: photo + student info
-      if (_photoUrl != null || _metaFields.isNotEmpty)
-        SingleChildScrollView(
-          physics: const NeverScrollableScrollPhysics(),
-          child: Column(children: [
-            if (_photoUrl != null) ...[
-              const SizedBox(height: 16),
-              _buildPhotoCard(_photoUrl!),
-              const SizedBox(height: 12),
-            ],
-            if (_metaFields.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: _buildKeyValueCard(_metaFields),
-              ),
-            const SizedBox(height: 12),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: _buildSectionLabel('Report'),
-            ),
-            const SizedBox(height: 8),
-          ]),
-        ),
-      // WebView fills the remaining space
+      // Fixed photo header — compact, no scroll wrapper needed
+      if (_photoUrl != null) ...[
+        const SizedBox(height: 16),
+        _buildPhotoCard(_photoUrl!),
+        const SizedBox(height: 8),
+      ],
+      // WebView fills remaining space and handles its own internal scrolling
       Expanded(
         child: Stack(children: [
           WebViewWidget(controller: _webController!),
