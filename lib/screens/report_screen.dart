@@ -108,21 +108,28 @@ class _ReportScreenState extends State<ReportScreen> {
 
   String? _extractPhoto(dynamic data) {
     if (data is! Map) return null;
-    // Check top-level fields
-    for (final entry in data.entries) {
-      final key = entry.key.toString().toLowerCase().replaceAll(' ', '_');
+
+    // 1. Look inside studentinfo first — this is where photoURL lives
+    final studentInfo = data['studentinfo'] ?? data['student_info'] ?? data['StudentInfo'];
+    if (studentInfo is Map) {
+      final url = _findPhotoUrl(studentInfo);
+      if (url != null) return url;
+    }
+
+    // 2. Fall back to top-level fields
+    return _findPhotoUrl(data);
+  }
+
+  /// Scan a single Map for any field that matches a photo key and holds a URL
+  String? _findPhotoUrl(Map map) {
+    for (final entry in map.entries) {
+      final key = entry.key.toString().toLowerCase()
+          .replaceAll(' ', '_').replaceAll('-', '_');
       if (_photoKeys.contains(key)) {
         final val = entry.value?.toString().trim() ?? '';
         if (val.isNotEmpty && (val.startsWith('http') || val.startsWith('/'))) {
           return val;
         }
-      }
-    }
-    // Also check inside nested maps (e.g. studentinfo.photoURL)
-    for (final entry in data.entries) {
-      if (entry.value is Map) {
-        final nested = _extractPhoto(entry.value);
-        if (nested != null) return nested;
       }
     }
     return null;
